@@ -15,8 +15,8 @@ type SpriteOpts struct {
 	Mirror bool
 }
 
-// Sprite 把 img 的 src 那块放进 at: 只画 win 里那部分(图比窗口大时多出来的被裁掉),
-// Lean 非零按斜切采样。win 一般等于 at; 图比窗口大时给窗口。
+// Sprite 把 img 的 src 那块放进 at; win 是可见窗口(一般等于 at), 落在它外面的不写。
+// Lean 非零按斜切采样; 目标与源一样大时直拷, 不做重采样。
 func (b Brush) Sprite(at, win, src image.Rectangle, img *image.RGBA, opts SpriteOpts) {
 	if b.Dst == nil || img == nil {
 		return
@@ -33,9 +33,15 @@ func (b Brush) Sprite(at, win, src image.Rectangle, img *image.RGBA, opts Sprite
 		return
 	}
 	if opts.Lean == 0 {
-		if this := at.Intersect(win); !this.Empty() {
-			scaleInto(b.Dst, img, src, this, b.Par, b.Scratch)
+		vis := at.Intersect(win)
+		if vis.Empty() {
+			return
 		}
+		if src.Dx() == at.Dx() && src.Dy() == at.Dy() {
+			pasteCopy(b.Dst, img, src, at, vis)
+			return
+		}
+		scaleInto(b.Dst, img, src, vis, b.Par, b.Scratch)
 		return
 	}
 	if opts.Mirror {
@@ -43,6 +49,26 @@ func (b Brush) Sprite(at, win, src image.Rectangle, img *image.RGBA, opts Sprite
 		return
 	}
 	pasteSkewedWithin(b.Dst, img, src, at, win, opts.Lean)
+}
+
+// pasteCopy 把 src 原样贴进 at(不重采样), 只写 vis 那部分。
+func pasteCopy(dst, src *image.RGBA, crop, at, vis image.Rectangle) {
+	dx, dy := vis.Min.X-at.Min.X, vis.Min.Y-at.Min.Y
+	pix := src.Pix
+	row := crop.Min.Y + dy
+	for y := vis.Min.Y; y < vis.Max.Y; y++ {
+		si := src.PixOffset(crop.Min.X+dx, row)
+		di := dst.PixOffset(vis.Min.X, y)
+		for x := 0; x < vis.Dx(); x++ {
+			if a := pix[si+3]; a == 255 {
+				copy(dst.Pix[di:di+4], pix[si:si+4])
+			} else if a != 0 {
+				rgba.BlendAt(dst.Pix, di, color.RGBA{R: pix[si], G: pix[si+1], B: pix[si+2], A: a})
+			}
+			si, di = si+4, di+4
+		}
+		row++
+	}
 }
 
 // pasteMirrorWithin 把 src 贴进斜切窗口, 越界采样按镜像折回图内(不夹边)。

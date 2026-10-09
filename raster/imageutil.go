@@ -136,6 +136,19 @@ func ResizeCover(src *image.RGBA, w, h int, par Par) *image.RGBA {
 	return CropCenter(full, w, h)
 }
 
+// Resize 把 src 缩放到 w×h 并返回新画布; 尺寸相同则原样返回 src。
+func Resize(src *image.RGBA, w, h int, par Par) *image.RGBA {
+	if src == nil || w <= 0 || h <= 0 {
+		return nil
+	}
+	if src.Rect.Dx() == w && src.Rect.Dy() == h {
+		return src
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	resize(src, dst, par)
+	return dst
+}
+
 // ResizeInto 把 src 缩放到 dst 的尺寸(相同尺寸则原样不动)。
 func ResizeInto(src, dst *image.RGBA, par Par) {
 	if src == nil || dst == nil {
