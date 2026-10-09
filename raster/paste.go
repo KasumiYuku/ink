@@ -13,10 +13,12 @@ type SpriteOpts struct {
 	Lean float64
 	// Mirror 让越界采样镜像折回图内 —— 斜切窗口与图一样大时, 夹边会在角上拉出一排重复像素。
 	Mirror bool
+	// Nearest 按最近邻重采样(像素级锐利), 默认是按面积/双三次缩放。
+	Nearest bool
 }
 
 // Sprite 把 img 的 src 那块放进 at; win 是可见窗口(一般等于 at), 落在它外面的不写。
-// Lean 非零按斜切采样; 目标与源一样大时直拷, 不做重采样。
+// Lean 非零或 Nearest 时按最近邻逐行采样; 否则目标与源一样大就直拷、不一样就重采样。
 func (b Brush) Sprite(at, win, src image.Rectangle, img *image.RGBA, opts SpriteOpts) {
 	if b.Dst == nil || img == nil {
 		return
@@ -32,7 +34,7 @@ func (b Brush) Sprite(at, win, src image.Rectangle, img *image.RGBA, opts Sprite
 	if win.Empty() {
 		return
 	}
-	if opts.Lean == 0 {
+	if opts.Lean == 0 && !opts.Nearest {
 		vis := at.Intersect(win)
 		if vis.Empty() {
 			return
