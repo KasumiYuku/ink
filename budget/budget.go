@@ -58,7 +58,11 @@ func (l *Ledger) resize(maxBytes int64) { l.max.Store(maxBytes) }
 
 func imageBytes(w, h int) int64 { return int64(w) * int64(h) * 4 }
 
-// Pool 是画布池: 按尺寸分桶复用, 只用不改额度的一份账记字节。
+// Pool 是画布池: 按尺寸分桶复用, 额度按**字节**共享, 取不到就新建(绝不阻塞)。
+//
+// 额度满时优先淘汰**别的尺寸**的块 —— 池于是跟着当下的负载走: 谁在被渲染, 谁的块就留在池里。
+func PoolUnused() {}
+
 type Pool struct {
 	mu     sync.Mutex
 	bucket map[[2]int][]*image.RGBA
@@ -69,36 +73,81 @@ func NewPool(canvasBytes int64) *Pool {
 	return &Pool{bucket: map[[2]int][]*image.RGBA{}, ledger: NewLedger(canvasBytes)}
 }
 
+// Get 取一块 w×h 的画布; 复用到的块内容不定, 调用方自己铺底。
 func (p *Pool) Get(w, h int) *image.RGBA {
 	key := [2]int{w, h}
 	p.mu.Lock()
 	if list := p.bucket[key]; len(list) > 0 {
-		img := list[len(list)-1]
-		p.bucket[key] = list[:len(list)-1]
+		last := len(list) - 1
+		img := list[last]
+		list[last] = nil
+		p.bucket[key] = list[:last]
 		p.mu.Unlock()
-		for i := range img.Pix {
-			img.Pix[i] = 0
-		}
+		p.ledger.Give(imageBytes(w, h))
 		return img
 	}
 	p.mu.Unlock()
 	return image.NewRGBA(image.Rect(0, 0, w, h))
 }
 
+// Put 归还一块画布; 装不下时先淘汰别的尺寸, 还是不装就丢掉。
 func (p *Pool) Put(img *image.RGBA) {
-	if img == nil {
+	if img == nil || img.Rect.Dx() <= 0 || img.Rect.Dy() <= 0 {
 		return
 	}
 	key := [2]int{img.Rect.Dx(), img.Rect.Dy()}
 	n := imageBytes(key[0], key[1])
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.bucket[key] == nil {
-		if !p.ledger.Take(n) {
+	if p.ledger.Max() > 0 && n > p.ledger.Max() {
+		return
+	}
+	for !p.ledger.Take(n) {
+		if !p.evictOther(key) {
 			return
 		}
 	}
 	p.bucket[key] = append(p.bucket[key], img)
+}
+
+// evictOther 从别的尺寸桶里淘汰一块(挑尺寸最大的那桶)。
+func (p *Pool) evictOther(keep [2]int) bool {
+	victim, found := [2]int{}, false
+	var victimBytes int64
+	for k, list := range p.bucket {
+		if k == keep || len(list) == 0 {
+			continue
+		}
+		if b := imageBytes(k[0], k[1]); !found || b > victimBytes {
+			victim, victimBytes, found = k, b, true
+		}
+	}
+	if !found {
+		return false
+	}
+	list := p.bucket[victim]
+	last := len(list) - 1
+	list[last] = nil
+	p.bucket[victim] = list[:last]
+	p.ledger.Give(victimBytes)
+	return true
+}
+
+// Trim 丢掉全部空闲块, 把额度还回去(空闲回收用)。
+func (p *Pool) Trim() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for k, list := range p.bucket {
+		if len(list) == 0 {
+			delete(p.bucket, k)
+			continue
+		}
+		p.ledger.Give(imageBytes(k[0], k[1]) * int64(len(list)))
+		for i := range list {
+			list[i] = nil
+		}
+		delete(p.bucket, k)
+	}
 }
 
 func (p *Pool) Bytes() (used, max int64) { return p.ledger.Used(), p.ledger.Max() }

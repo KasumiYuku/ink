@@ -173,7 +173,7 @@ theme.Options{
 | 编码器 | 说明 |
 |---|---|
 | `encode.JPEG(quality)` | 标准库 JPEG |
-| `encode.WebP(opts)` | 调用外部 `cwebp`；支持质量下限与体积预算重编；不可用时返回 `encode.ErrUnavailable` |
+| `encode.WebP(opts)` | 调用外部 `cwebp`（画布以 PPM 从 stdin 流过去，不留临时文件）；实现 `encode.Budgeted`：按这一张的体积上限退档重编；不可用时返回 `encode.ErrUnavailable` |
 
 ## 确定性与指纹
 

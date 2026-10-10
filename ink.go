@@ -190,6 +190,7 @@ func (e *Engine) Render(s *Sheet) ([]byte, error) {
 	release := e.gate.Acquire()
 	defer release()
 	img := e.pool.Get(s.W, s.H)
+	clear(img.Pix)
 	defer e.pool.Put(img)
 
 	c := &Canvas{eng: e, dst: img, xform: raster.Identity()}

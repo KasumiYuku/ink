@@ -284,6 +284,7 @@ func (c *Canvas) Clip(r Rect) func() {
 // Group 开一个新图层(buffer 从池里借), 还原时按 alpha 整体叠回 —— 组内互相重叠的边不会露两层。
 func (c *Canvas) Group(alpha float64) func() {
 	buf := c.eng.borrow(c.W(), c.H())
+	clear(buf.Pix)
 	c.groups = append(c.groups, group{base: c.dst, buf: buf, alpha: alpha})
 	c.dst = buf
 	return func() {
