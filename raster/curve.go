@@ -10,43 +10,42 @@ import (
 type Pt struct{ X, Y float64 }
 
 // Polyline 按列算纵向覆盖率, 描出带宽度的折线。
+//
+// 落笔一律走 brush 自己的那段路径(见 span), 于是 Clip / Mode / Hard 与其它原语一个口径 ——
+// 以前这里直接调包级的 Fill/FillSpan, 设了 Clip 的 brush 描折线会画到框外面去。
 func (b Brush) Polyline(pts []Pt, width float64, ink color.RGBA) {
-	dst, mode := b.Dst, b.Mode
-	if dst == nil {
-		return
-	}
-	if dst == nil || len(pts) == 0 || ink.A == 0 {
+	if b.Dst == nil || len(pts) == 0 || ink.A == 0 {
 		return
 	}
 	w := width
 	if w < 1 {
 		w = 1
 	}
+	r := b.Bounds()
+	// 单点: 给一个小方块(一个像素的点在缩图之后基本看不见)。
 	if len(pts) == 1 {
 		x := int(math.Round(pts[0].X - w/2))
 		y := int(math.Round(pts[0].Y - w/2))
-		r := image.Rect(x, y, x+int(math.Ceil(w)), y+int(math.Ceil(w)))
-		if mode == Over {
-			Fill(dst, r, ink)
-		} else {
-			FillRectMode(dst, r, ink, mode)
+		box := image.Rect(x, y, x+int(math.Ceil(w)), y+int(math.Ceil(w))).Intersect(r)
+		for yy := box.Min.Y; yy < box.Max.Y; yy++ {
+			b.span(yy, Span{X0: float64(box.Min.X), X1: float64(box.Max.X)}, ink)
 		}
 		return
 	}
 	half := w / 2
 	for i := 0; i+1 < len(pts); i++ {
-		a, b := pts[i], pts[i+1]
-		if b.X < a.X {
-			a, b = b, a
+		from, to := pts[i], pts[i+1]
+		if to.X < from.X {
+			from, to = to, from
 		}
-		x0 := int(math.Floor(a.X))
-		x1 := int(math.Ceil(b.X))
+		x0 := int(math.Floor(from.X))
+		x1 := int(math.Ceil(to.X))
 		if x1 <= x0 {
-			x1 = x0 + 1
+			x1 = x0 + 1 // 同一列上的两个点(竖直段): 也要落一笔
 		}
-		for x := x0; x < x1; x++ {
-			ya := segY(a, b, float64(x)-0.5)
-			yb := segY(a, b, float64(x)+0.5)
+		for x := max(x0, r.Min.X); x < min(x1, r.Max.X); x++ {
+			ya := segY(from, to, float64(x)-0.5)
+			yb := segY(from, to, float64(x)+0.5)
 			if ya > yb {
 				ya, yb = yb, ya
 			}
@@ -54,14 +53,16 @@ func (b Brush) Polyline(pts []Pt, width float64, ink color.RGBA) {
 			if bottom <= top {
 				bottom = top + 1
 			}
-			for y := int(math.Floor(top)); y < int(math.Ceil(bottom)); y++ {
-				if cov := math.Min(bottom, float64(y)+1) - math.Max(top, float64(y)); cov > 0 {
-					c := ink
-					if cov < 1 {
-						c.A = uint8(math.Round(float64(ink.A) * cov))
-					}
-					FillSpan(dst, y, float64(x), float64(x+1), c, mode)
+			for y := max(int(math.Floor(top)), r.Min.Y); y < min(int(math.Ceil(bottom)), r.Max.Y); y++ {
+				cov := math.Min(bottom, float64(y)+1) - math.Max(top, float64(y))
+				if cov <= 0 {
+					continue
 				}
+				col := ink
+				if cov < 1 {
+					col.A = uint8(math.Round(float64(ink.A) * cov))
+				}
+				b.span(y, Span{X0: float64(x), X1: float64(x + 1)}, col)
 			}
 		}
 	}
