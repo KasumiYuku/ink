@@ -84,6 +84,48 @@ func Outset(s Shape, d float64) Shape {
 // Ring 是"外形状减内形状"的环; 描边就是它 —— 角上天然不会叠两次。
 func Ring(outer, inner Shape) Shape { return ring{outer: outer, inner: inner} }
 
+// LeftBar 是"外形每行最左边 w 宽"的那一条, RightBar 同理取最右边 —— 竖条跟着斜边/圆角收时用它。
+//
+// 某一行比 w 还窄(圆角收口那几行)时整行都算: 色条不该画到外形外面去。
+func LeftBar(s Shape, w float64) Shape  { return edgeBar{s: s, w: w} }
+func RightBar(s Shape, w float64) Shape { return edgeBar{s: s, w: -w} }
+
+type edgeBar struct {
+	s Shape
+	// w 为正是左缘那一条, 为负是右缘那一条。
+	w float64
+}
+
+func (e edgeBar) Single(y int) (Span, bool) { return e.bar(y) }
+
+func (e edgeBar) Spans(y int, dst []Span) []Span {
+	sp, ok := e.bar(y)
+	if !ok {
+		return dst
+	}
+	return AppendSpan(dst, sp.X0, sp.X1)
+}
+
+func (e edgeBar) Bounds() image.Rectangle { return e.s.Bounds() }
+
+// Outset 让色条跟着外形一起外扩/内缩(见 Outsetter): 斜切板的左缘条外扩后贴着同一条斜边。
+func (e edgeBar) Outset(d float64) Shape { return edgeBar{s: Outset(e.s, d), w: e.w} }
+
+func (e edgeBar) bar(y int) (Span, bool) {
+	sp, ok := spanOf(e.s, y, nil)
+	if !ok {
+		return Span{}, false
+	}
+	w := math.Abs(e.w)
+	if w <= 0 || w >= sp.X1-sp.X0 {
+		return sp, true
+	}
+	if e.w > 0 {
+		return Span{X0: sp.X0, X1: sp.X0 + w}, true
+	}
+	return Span{X0: sp.X1 - w, X1: sp.X1}, true
+}
+
 type ring struct {
 	outer, inner Shape
 }
