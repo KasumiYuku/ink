@@ -168,3 +168,110 @@ func hardBreak(f Face, word string, width float64, st Style) ([]string, string) 
 	}
 	return done, ""
 }
+
+// roundW 把一行字的宽度落到整像素(与落笔同一个口径: int(v+0.5))。
+func roundW(v float64) int { return int(v + 0.5) }
+
+// WrapLimit 按宽度把一段文字折成至多 maxLines 行: 每行贪心取尽量多的字, 最后一行的余量接省略号。
+//
+// 判据与落笔同口径(整像素, 见 roundW): 量出来"刚好放得下"的那一行, 画出来也刚好放得下。
+func WrapLimit(f Face, s string, width float64, maxLines int, st Style) []string {
+	if f == nil || strings.TrimSpace(s) == "" || maxLines <= 0 {
+		return nil
+	}
+	limit := int(width)
+	runes := []rune(s)
+	lines := make([]string, 0, maxLines)
+	for len(runes) > 0 && len(lines) < maxLines {
+		last := len(lines) == maxLines-1
+		take := len(runes)
+		for take > 0 && roundW(Width(f, string(runes[:take]), st)) > limit {
+			take--
+		}
+		if take <= 0 {
+			take = 1
+		}
+		if take >= len(runes) {
+			lines = append(lines, string(runes))
+			break
+		}
+		if last {
+			lines = append(lines, Ellipsize(f, string(runes), float64(limit), st))
+			break
+		}
+		lines = append(lines, string(runes[:take]))
+		runes = runes[take:]
+	}
+	return lines
+}
+
+// Balance 把已经折好的几行重新摊匀: 行数不变、段(按 sep 拆出来的原子段)顺序不变, 枚举所有切法,
+// 取"最长那一行最短"的那个; 段数不超过行数、或找不到合法切法时原样返回。
+//
+// 摊匀是折行的第二步: 贪心装出来的行往往最后一行很短, 观感上像一句被切断的话。切法只在
+// 段边界上挪 —— 段内部的字不会被拆开, 所以它不改变每一段的内容, 只改变它们分到哪一行。
+func Balance(f Face, lines []string, sep string, width float64, st Style) []string {
+	if f == nil || len(lines) < 2 {
+		return lines
+	}
+	segments := make([]string, 0, len(lines))
+	for _, line := range lines {
+		segments = append(segments, strings.Split(line, sep)...)
+	}
+	if len(segments) <= len(lines) {
+		return lines // 一段一行, 没有可挪的
+	}
+	limit := int(width)
+	rowWidth := func(segs []string) int { return roundW(Width(f, strings.Join(segs, sep), st)) }
+
+	rows := len(lines)
+	cuts := make([]int, rows)    // 试探中的切法: 每一行结束在哪个段(不含)
+	best := make([]int, rows)    // 目前最好的切法
+	bestWorst, found := 0, false // 最好的切法里最长那一行有多宽
+	var walk func(row, from, worst int)
+	walk = func(row, from, worst int) {
+		if row == rows-1 {
+			if from >= len(segments) {
+				return
+			}
+			w := rowWidth(segments[from:])
+			if w > limit {
+				return
+			}
+			if w > worst {
+				worst = w
+			}
+			if !found || worst < bestWorst {
+				copy(best, cuts)
+				best[row] = len(segments)
+				bestWorst, found = worst, true
+			}
+			return
+		}
+		// 最后几行各至少要留一段, 所以这一行最多断到 len(segments)-(rows-1-row)。
+		for end := from + 1; end <= len(segments)-(rows-1-row); end++ {
+			w := rowWidth(segments[from:end])
+			if w > limit {
+				break
+			}
+			cuts[row] = end
+			next := worst
+			if w > next {
+				next = w
+			}
+			walk(row+1, end, next)
+		}
+	}
+	walk(0, 0, 0)
+	if !found {
+		return lines
+	}
+
+	out := make([]string, 0, rows)
+	from := 0
+	for _, end := range best {
+		out = append(out, strings.Join(segments[from:end], sep))
+		from = end
+	}
+	return out
+}

@@ -16,6 +16,9 @@ type Style struct {
 	Ink   color.RGBA
 	Clip  image.Rectangle
 	Kern  bool
+	// Quantize 让笔位只落在整像素上: 每个字形的步进、字距、字偶距都吸附到整像素再累加。
+	// 版式按像素对齐时用它(签名/水印那种"按整像素格摆"的排版); 默认关, 走定点累加。
+	Quantize bool
 }
 
 func (s Style) WithInk(c color.RGBA) Style       { s.Ink = c; return s }
@@ -23,6 +26,7 @@ func (s Style) WithTrack(px float64) Style       { s.Track = px; return s }
 func (s Style) WithAlign(a Align) Style          { s.Align = a; return s }
 func (s Style) WithMode(m Mode) Style            { s.Mode = m; return s }
 func (s Style) WithKern(on bool) Style           { s.Kern = on; return s }
+func (s Style) WithQuantize(on bool) Style       { s.Quantize = on; return s }
 func (s Style) WithClip(r image.Rectangle) Style { s.Clip = r; return s }
 
 func inkOf(st Style) color.RGBA {
@@ -55,20 +59,20 @@ func Draw(dst *image.RGBA, f Face, x, baseline float64, s string, st Style) floa
 	}
 	start := fixed.Int26_6(math.Round(x * 64))
 	pen := start
-	track := fixed.Int26_6(math.Round(st.Track * 64))
+	track := stepPX(st.Track, st.Quantize)
 	by := int(math.Round(baseline))
 	var prev rune
 	first := true
 	for _, r := range s {
 		if fs := gf.owner(r, bin); fs != nil {
 			if st.Kern && !first {
-				pen += gf.set.kern(gf.faces[0], prev, r)
+				pen += step26(gf.set.kern(gf.faces[0], prev, r), st.Quantize)
 			}
 			m := gf.set.glyph(fs, r, bin, uint8(pen&63))
 			if m.W > 0 && m.H > 0 {
 				blit(dst, m, int(pen>>6), by, ink, st.Clip)
 			}
-			pen += m.Adv
+			pen += step26(m.Adv, st.Quantize)
 			prev, first = r, false
 		}
 		pen += track
