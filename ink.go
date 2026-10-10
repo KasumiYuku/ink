@@ -96,7 +96,7 @@ type Engine struct {
 	scratch  *raster.Scratch
 	masks    *raster.MaskCache
 	par      raster.Par
-	epoch    string
+	key      Key
 	onWarn   func(error)
 
 	// flight 是"同一把 key 的并发只画一次"的登记处(见 RenderJob)。
@@ -150,42 +150,64 @@ func New(opts Options) (*Engine, error) {
 		onWarn:    opts.OnWarn,
 		trace:     opts.Trace,
 	}
-	e.epoch = e.computeEpoch(opts.Version, opts.ContentDigest)
+	e.key = NewKey(opts.Version, opts.ContentDigest, enc)
 	return e, nil
 }
 
-// computeEpoch 是"画出来的字节由什么决定"的那份摘要: 代码版本 + 素材内容 + 编码器身份。
-func (e *Engine) computeEpoch(version, digest string) string {
+// Key 是一份出图身份: 代码版本 + 素材内容 + 编码器身份。它是**值**, 可以提前算好、可以传给别人。
+type Key struct{ prefix string }
+
+// NewKey 把"画出来的字节由什么决定"压成一份身份; 三段里任何一段变了, 旧键一律不复用。
+//
+// 它是值而不是引擎的方法, 因为"渲染之前就要算出同一把键"的地方(直链缓存、能力层)拿不到引擎,
+// 而它们要的本来也只是这把键。
+func NewKey(version, digest string, enc encode.Encoder) Key {
 	h := sha256.New()
 	io.WriteString(h, "ink=v1\nversion=")
 	io.WriteString(h, version)
 	io.WriteString(h, "\ncontent=")
 	io.WriteString(h, digest)
 	io.WriteString(h, "\nencoder=")
-	io.WriteString(h, e.enc.ID())
-	return hex.EncodeToString(h.Sum(nil))
+	if enc != nil {
+		io.WriteString(h, enc.ID())
+	}
+	return Key{prefix: hex.EncodeToString(h.Sum(nil))}
 }
 
-// Epoch 是本实例的指纹前缀; 换版本/换素材/换编码器它就会变, 旧键一律不复用。
-func (e *Engine) Epoch() string { return e.epoch }
-
-// Fingerprint 把一次请求压成定长键: epoch + 图种 + spec 的 JSON。
+// Fingerprint 把一次请求压成定长键: 身份 + 图种 + spec 的 JSON。
 //
 // spec 是全量输入, 所以"同一把键"必然画出同一份字节; 反过来键一变就是一次新画, 不会发出旧图。
 // 编码失败(理论上不会)返回空串, 调用方据此跳过缓存直接画。
-func (e *Engine) Fingerprint(kind string, v any) string {
+func (k Key) Fingerprint(kind string, v any) string {
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return ""
 	}
 	h := sha256.New()
-	io.WriteString(h, e.epoch)
+	io.WriteString(h, k.prefix)
 	io.WriteString(h, "|")
 	io.WriteString(h, kind)
 	io.WriteString(h, "|")
 	h.Write(raw)
 	return hex.EncodeToString(h.Sum(nil))
 }
+
+// Short 是身份的前八位, 只给日志用。
+func (k Key) Short() string {
+	if len(k.prefix) > 8 {
+		return k.prefix[:8]
+	}
+	return k.prefix
+}
+
+// Key 是本实例的身份; 换版本/换素材/换编码器它就会变, 旧键一律不复用。
+func (e *Engine) Key() Key { return e.key }
+
+// Epoch 是身份的十六进制前缀(日志与调试用)。
+func (e *Engine) Epoch() string { return e.key.prefix }
+
+// Fingerprint 见 Key.Fingerprint。
+func (e *Engine) Fingerprint(kind string, v any) string { return e.key.Fingerprint(kind, v) }
 
 func (e *Engine) Assets() *theme.Assets { return e.assets }
 

@@ -200,6 +200,37 @@ func Rect(b Box) Shape                       { return BoxShape{Box: b} }
 func Round(b Box, radius float64) Shape      { return BoxShape{Box: b, Radius: radius} }
 func Skew(b Box, radius, lean float64) Shape { return BoxShape{Box: b, Radius: radius, Lean: lean} }
 
+// SkewFrom 是"斜切基准不在自己身上"的斜切矩形: 一整页共用一条斜切基线时用它(见 SkewDX)。
+//
+// 与 Skew 的两点区别: 位移按 anchor 的竖直中线算, 且取整到**整像素** —— 一整页的斜边落在同一条
+// 像素网格上, 边与边之间才不会一段一段地错开(逐行浮点位移会在窄条上露出来)。
+func SkewFrom(b Box, lean float64, anchor Box) Shape {
+	return skewFrom{b: b, lean: lean, anchor: anchor}
+}
+
+type skewFrom struct {
+	b      Box
+	lean   float64
+	anchor Box
+}
+
+func (s skewFrom) Range(y int) (float64, float64) {
+	dx := float64(SkewDX(s.anchor.Y, s.anchor.Y1(), float64(y), s.lean))
+	return s.b.X + dx, s.b.X1() + dx
+}
+
+func (s skewFrom) Single(y int) (Span, bool) {
+	x0, x1 := s.Range(y)
+	return Span{X0: x0, X1: x1}, x1 > x0
+}
+
+func (s skewFrom) Spans(y int, dst []Span) []Span {
+	x0, x1 := s.Range(y)
+	return AppendSpan(dst, x0, x1)
+}
+
+func (s skewFrom) Bounds() image.Rectangle { return s.b.Bounds() }
+
 // Outset 整块外扩 d, 圆角半径同步涨 d(弧心落在同一条法线上); d 为负就是内缩。
 func (s BoxShape) Outset(d float64) Shape {
 	radius := s.Radius + d
