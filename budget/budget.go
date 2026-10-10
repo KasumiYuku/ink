@@ -53,16 +53,10 @@ func (l *Ledger) Give(n int64) {
 func (l *Ledger) Used() int64 { return l.used.Load() }
 func (l *Ledger) Max() int64  { return l.max.Load() }
 
-// resize 是额度变更(面板热更): 只改上限, 已经占用的等归还时自然收敛。
-func (l *Ledger) resize(maxBytes int64) { l.max.Store(maxBytes) }
-
 func imageBytes(w, h int) int64 { return int64(w) * int64(h) * 4 }
 
 // Pool 是画布池: 按尺寸分桶复用, 额度按**字节**共享, 取不到就新建(绝不阻塞)。
-//
 // 额度满时优先淘汰**别的尺寸**的块 —— 池于是跟着当下的负载走: 谁在被渲染, 谁的块就留在池里。
-func PoolUnused() {}
-
 type Pool struct {
 	mu     sync.Mutex
 	bucket map[[2]int][]*image.RGBA
