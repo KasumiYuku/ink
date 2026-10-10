@@ -242,17 +242,23 @@ func (s BoxShape) Outset(d float64) Shape {
 
 // Range 是这一行的水平范围: 斜切与圆角算在同一个式子里。
 func (s BoxShape) Range(y int) (float64, float64) {
+	return SpanOf(s.Box, s.Radius, s.Lean, y)
+}
+
+// SpanOf 是"斜切圆角矩形在第 y 行的水平范围"的纯函数读法: 不建形状、不分配 —— 热路径(逐行读几百上千次)
+// 用它, 其余地方用形状。算术只有这一份, 两种读法不会各算一套。
+func SpanOf(b Box, radius, lean float64, y int) (float64, float64) {
 	cy := float64(y) + 0.5
-	top, bottom := s.Box.Y, s.Box.Y1()
+	top, bottom := b.Y, b.Y1()
 	if cy < top || cy > bottom {
 		return 0, 0
 	}
 	dx := 0.0
-	if s.Lean != 0 {
-		dx = s.Lean * (s.Box.CenterY() - cy)
+	if lean != 0 {
+		dx = lean * (b.CenterY() - cy)
 	}
-	x0, x1 := s.Box.X+dx, s.Box.X1()+dx
-	if radius := s.Radius; radius > 0 {
+	x0, x1 := b.X+dx, b.X1()+dx
+	if radius > 0 {
 		if d := cy - top; d < radius {
 			k := radius - math.Sqrt(radius*radius-(radius-d)*(radius-d))
 			x0, x1 = x0+k, x1-k

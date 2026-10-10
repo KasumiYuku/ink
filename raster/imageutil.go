@@ -303,3 +303,72 @@ func compressByte(v float64) uint8 {
 		return uint8(math.Round(v))
 	}
 }
+
+// LumaMode 是这块区域里亮度直方图的**众数**与最小值: 众数就是画面里最多的那一档(板面/底色),
+// 最小值是笔画最深的地方。亮度按 Rec.601 权重取整(299/587/114), 与渲染层同一个口径。
+func LumaMode(img *image.RGBA, r image.Rectangle) (mode, lo int) {
+	if img == nil {
+		return 0, 0
+	}
+	r = r.Intersect(img.Rect)
+	if r.Empty() {
+		return 0, 0
+	}
+	var hist [256]int
+	lo = 255
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		for x := r.Min.X; x < r.Max.X; x++ {
+			v := lumaAt(img, x, y)
+			hist[v]++
+			if v < lo {
+				lo = v
+			}
+		}
+	}
+	best := -1
+	for v, n := range hist {
+		if n > best {
+			mode, best = v, n
+		}
+	}
+	return mode, lo
+}
+
+// InkFromLuma 把一块图化成"纯黑的墨": RGB 一律 0, alpha 是像素相对 mode 的深度 —— mode 那一档
+// 全透明(底色原样透出来), 越暗越实, 到底 lo 为满; 再乘上像素自己的 alpha。mode==lo 时全透明。
+//
+// 回来的是 0 起点的图(与原图尺寸相同, 见 CropCenter 那类原语的惯例), 可以当贴图直接用。
+func InkFromLuma(img *image.RGBA, r image.Rectangle, mode, lo int) *image.RGBA {
+	if img == nil {
+		return nil
+	}
+	r = r.Intersect(img.Rect)
+	if r.Empty() {
+		return nil
+	}
+	out := image.NewRGBA(image.Rect(0, 0, r.Dx(), r.Dy()))
+	span := float64(mode - lo)
+	for y := 0; y < r.Dy(); y++ {
+		for x := 0; x < r.Dx(); x++ {
+			i := img.PixOffset(r.Min.X+x, r.Min.Y+y)
+			if span <= 0 {
+				continue
+			}
+			t := float64(mode-lumaAt(img, r.Min.X+x, r.Min.Y+y)) / span
+			switch {
+			case t <= 0:
+				continue
+			case t > 1:
+				t = 1
+			}
+			out.Pix[out.PixOffset(x, y)+3] = uint8(t*float64(img.Pix[i+3]) + 0.5)
+		}
+	}
+	return out
+}
+
+// lumaAt 是 Rec.601 亮度的整数口径(与 LumaMode / InkFromLuma 共用)。
+func lumaAt(img *image.RGBA, x, y int) int {
+	i := img.PixOffset(x, y)
+	return (int(img.Pix[i])*299 + int(img.Pix[i+1])*587 + int(img.Pix[i+2])*114) / 1000
+}
