@@ -4,8 +4,6 @@ import (
 	"image"
 	"image/color"
 	"math"
-
-	"github.com/KasumiYuku/ink/internal/rgba"
 )
 
 // Style 是一段文字的落笔样式; 零值 = 左对齐/灰度/无字距/不裁剪/不透明白。
@@ -111,6 +109,7 @@ func blit(dst *image.RGBA, m *mask, penX, baseY int, ink color.RGBA, clip image.
 	x0 := penX + m.Left
 	y0 := baseY + m.Top
 	pix := dst.Pix
+	sr, sg, sb, sa := ink.RGBA()
 	for row := 0; row < m.H; row++ {
 		dy := y0 + row
 		if dy < cy0 || dy >= cy1 {
@@ -130,13 +129,24 @@ func blit(dst *image.RGBA, m *mask, penX, baseY int, ink color.RGBA, clip image.
 		srcRow := row * m.W
 		base := (dy-dst.Rect.Min.Y)*dst.Stride + (x0+cStart-dst.Rect.Min.X)*4
 		for col := cStart; col < cEnd; col++ {
-			cov := m.Pix[srcRow+col]
-			if cov != 0 {
-				rgba.BlendAt(pix, base, rgba.WithCoverage(ink, float64(cov)/255))
+			if cov := m.Pix[srcRow+col]; cov != 0 {
+				shadeGlyph(pix[base:base+4], cov, sr, sg, sb, sa)
 			}
 			base += 4
 		}
 	}
+}
+
+// shadeGlyph 是与 image/draw 的字形混合**逐字节相同**的那条算式(见 drawRGBAMaskOver)。
+func shadeGlyph(d []byte, cov uint8, sr, sg, sb, sa uint32) {
+	const m = 1<<16 - 1
+	ma := uint32(cov)
+	ma |= ma << 8
+	a := (m - sa*ma/m) * 0x101
+	d[0] = uint8((uint32(d[0])*a + sr*ma) / m >> 8)
+	d[1] = uint8((uint32(d[1])*a + sg*ma) / m >> 8)
+	d[2] = uint8((uint32(d[2])*a + sb*ma) / m >> 8)
+	d[3] = uint8((uint32(d[3])*a + sa*ma) / m >> 8)
 }
 
 const ellipsis = "…"
