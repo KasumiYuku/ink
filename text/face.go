@@ -1,5 +1,11 @@
 package text
 
+import (
+	"math"
+
+	"golang.org/x/image/math/fixed"
+)
+
 // Face 是某一族在某个字号上的度量与排版视图。
 type Face interface {
 	Measure(s string) (w, h float64)
@@ -24,36 +30,37 @@ func (f *glyphFace) Metrics() Metrics {
 	return f.faces[0].metrics
 }
 
-// resolve 沿链找到出这个字的那一族: 掩码与字距都得问对应那一族。
-func (f *glyphFace) resolve(r rune, bin bool) (*mask, *faceState) {
+// owner 沿链找到出这个字的那一族: 掩码与字距都得问对应那一族。
+func (f *glyphFace) owner(r rune, bin bool) *faceState {
 	for _, fs := range f.faces {
-		if m := f.set.glyph(fs, r, bin); m.present {
-			return m, fs
+		if f.set.glyph(fs, r, bin, 0).present {
+			return fs
 		}
 	}
-	return nil, nil
+	return nil
 }
 
-// advance 是唯一一份推进宽度算法: 逐字取整推进 + 可选字距调整 + 字距; 缺字不进位。
+// advance 是唯一一份推进宽度算法: 定点累加字形宽度与字距, 缺字不进位。
 func (f *glyphFace) advance(s string, st Style) float64 {
 	if len(f.faces) == 0 {
 		return 0
 	}
 	bin := st.Mode == ModeBinary
-	var total float64
+	track := fixed.Int26_6(math.Round(st.Track * 64))
+	var total fixed.Int26_6
 	var prev rune
 	first := true
 	for _, r := range s {
-		if m, fs := f.resolve(r, bin); m != nil {
-			if st.Kern && !first && fs != nil {
-				total += float64(f.set.kern(fs, prev, r))
+		if fs := f.owner(r, bin); fs != nil {
+			if st.Kern && !first {
+				total += f.set.kern(f.faces[0], prev, r)
 			}
-			total += float64(m.Advance)
+			total += f.set.glyph(fs, r, bin, 0).Adv
 			prev, first = r, false
 		}
-		total += st.Track
+		total += track
 	}
-	return total
+	return float64(total) / 64
 }
 
 func (f *glyphFace) Advance(s string, st Style) float64 { return f.advance(s, st) }

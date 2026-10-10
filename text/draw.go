@@ -4,6 +4,8 @@ import (
 	"image"
 	"image/color"
 	"math"
+
+	"golang.org/x/image/math/fixed"
 )
 
 // Style 是一段文字的落笔样式; 零值 = 左对齐/灰度/无字距/不裁剪/不透明白。
@@ -42,35 +44,36 @@ func Draw(dst *image.RGBA, f Face, x, baseline float64, s string, st Style) floa
 	}
 	bin := st.Mode == ModeBinary
 
-	startX := math.Round(x)
-	adv := 0.0
 	if st.Align != Left {
-		adv = gf.advance(s, st)
+		adv := gf.advance(s, st)
 		switch st.Align {
 		case Center:
-			startX = x - adv/2
+			x -= adv / 2
 		case Right:
-			startX = x - adv
+			x -= adv
 		}
 	}
+	start := fixed.Int26_6(math.Round(x * 64))
+	pen := start
+	track := fixed.Int26_6(math.Round(st.Track * 64))
 	by := int(math.Round(baseline))
-	total := 0.0
 	var prev rune
 	first := true
 	for _, r := range s {
-		if m, fs := gf.resolve(r, bin); m != nil {
-			if st.Kern && !first && fs != nil {
-				total += float64(gf.set.kern(fs, prev, r))
+		if fs := gf.owner(r, bin); fs != nil {
+			if st.Kern && !first {
+				pen += gf.set.kern(gf.faces[0], prev, r)
 			}
+			m := gf.set.glyph(fs, r, bin, uint8(pen&63))
 			if m.W > 0 && m.H > 0 {
-				blit(dst, m, int(math.Round(startX+total)), by, ink, st.Clip)
+				blit(dst, m, int(pen>>6), by, ink, st.Clip)
 			}
-			total += float64(m.Advance)
+			pen += m.Adv
 			prev, first = r, false
 		}
-		total += st.Track
+		pen += track
 	}
-	return total
+	return float64(pen-start) / 64
 }
 
 // Measure 返回一行字的宽度与行高。

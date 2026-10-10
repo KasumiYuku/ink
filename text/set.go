@@ -58,7 +58,7 @@ type Set struct {
 	stats  struct{ rasterized int }
 
 	kmu   sync.Mutex
-	kerns map[kernKey]int
+	kerns map[kernKey]fixed.Int26_6
 }
 
 func NewSet(opts Options) *Set {
@@ -70,7 +70,7 @@ func NewSet(opts Options) *Set {
 		fonts: map[string]*opentype.Font{},
 		faces: map[faceKey]*faceState{},
 		cache: newMaskCache(limit),
-		kerns: map[kernKey]int{},
+		kerns: map[kernKey]fixed.Int26_6{},
 	}
 }
 
@@ -166,7 +166,7 @@ func toMetrics(m font.Metrics) Metrics {
 type mask struct {
 	W, H      int
 	Left, Top int
-	Advance   int
+	Adv       fixed.Int26_6
 	Pix       []uint8
 	present   bool
 }
@@ -175,9 +175,9 @@ func (m *mask) size() int { return len(m.Pix) + 64 }
 
 const binaryThreshold = 128
 
-func rasterize(fs *faceState, r rune, bin bool) *mask {
+func rasterize(fs *faceState, r rune, bin bool, phase uint8) *mask {
 	fs.mu.Lock()
-	dr, src, maskp, adv, ok := fs.face.Glyph(fixed.Point26_6{}, r)
+	dr, src, maskp, adv, ok := fs.face.Glyph(fixed.Point26_6{X: fixed.Int26_6(phase)}, r)
 	if !ok {
 		fs.mu.Unlock()
 		return &mask{}
@@ -195,7 +195,7 @@ func rasterize(fs *faceState, r rune, bin bool) *mask {
 			}
 		}
 	}
-	return &mask{W: w, H: h, Left: dr.Min.X, Top: dr.Min.Y, Advance: adv.Round(), Pix: pix, present: true}
+	return &mask{W: w, H: h, Left: dr.Min.X, Top: dr.Min.Y, Adv: adv, Pix: pix, present: true}
 }
 
 func copyCoverage(dst []uint8, w, h int, src image.Image, maskp image.Point) {
@@ -229,16 +229,16 @@ func copyCoverage(dst []uint8, w, h int, src image.Image, maskp image.Point) {
 	}
 }
 
-// glyph 在链上按序找 r 的掩码; 命中的 miss 也会缓存, 避免重复查询。
-func (s *Set) glyph(fs *faceState, r rune, bin bool) *mask {
-	key := maskKey{id: fs.id, r: r, bin: bin}
+// glyph 取 r 在该族某个亚像素相位上的掩码; 命中的 miss 也会缓存, 避免重复查询。
+func (s *Set) glyph(fs *faceState, r rune, bin bool, phase uint8) *mask {
+	key := maskKey{id: fs.id, r: r, bin: bin, phase: phase}
 	s.mu.Lock()
 	if e := s.cache.get(key); e != nil {
 		m := e.m
 		s.mu.Unlock()
 		return m
 	}
-	m := rasterize(fs, r, bin)
+	m := rasterize(fs, r, bin, phase)
 	s.stats.rasterized++
 	s.cache.put(key, m)
 	s.mu.Unlock()
@@ -246,9 +246,10 @@ func (s *Set) glyph(fs *faceState, r rune, bin bool) *mask {
 }
 
 type maskKey struct {
-	id  uint32
-	r   rune
-	bin bool
+	id    uint32
+	r     rune
+	bin   bool
+	phase uint8
 }
 
 type kernKey struct {
@@ -259,8 +260,8 @@ type kernKey struct {
 // kernCacheMax 是字距对的缓存上限; 成对数量由实际用到的字符决定, 到顶就不再记(只是变慢, 不会错)。
 const kernCacheMax = 4096
 
-// kern 取一对字形之间的字距调整(像素)。
-func (s *Set) kern(fs *faceState, r0, r1 rune) int {
+// kern 取一对字形之间的字距调整; 字距只问链首那一族 —— 它是排版基准, 后备字体只补字形。
+func (s *Set) kern(fs *faceState, r0, r1 rune) fixed.Int26_6 {
 	key := kernKey{fs.id, r0, r1}
 	s.kmu.Lock()
 	v, cached := s.kerns[key]
@@ -269,7 +270,7 @@ func (s *Set) kern(fs *faceState, r0, r1 rune) int {
 		return v
 	}
 	fs.mu.Lock()
-	v = fs.face.Kern(r0, r1).Round()
+	v = fs.face.Kern(r0, r1)
 	fs.mu.Unlock()
 	s.kmu.Lock()
 	if len(s.kerns) < kernCacheMax {
@@ -361,6 +362,6 @@ func (s *Set) Close() {
 	s.cache.clear()
 	s.mu.Unlock()
 	s.kmu.Lock()
-	s.kerns = map[kernKey]int{}
+	s.kerns = map[kernKey]fixed.Int26_6{}
 	s.kmu.Unlock()
 }
