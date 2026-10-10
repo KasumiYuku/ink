@@ -85,6 +85,12 @@ func Measure(f Face, s string, st Style) (w, h float64) {
 	return gf.advance(s, st), gf.Metrics().LineHeight
 }
 
+// Width 是一行字的推进宽度(与 Measure 同一个数, 只是省掉一次解构)。
+func Width(f Face, s string, st Style) float64 {
+	w, _ := Measure(f, s, st)
+	return w
+}
+
 type Run struct {
 	X, Baseline float64
 	Text        string

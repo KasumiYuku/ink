@@ -3,6 +3,7 @@ package raster
 import (
 	"image"
 	"image/color"
+	"math"
 
 	"github.com/KasumiYuku/ink/internal/rgba"
 )
@@ -126,4 +127,67 @@ func foldIndex(i, lo, hi int) int {
 		k = period - 1 - k
 	}
 	return lo + k
+}
+
+// ShapeSprite 同 Sprite, 但每行只写 shape 覆盖到的那一段: 只给窗口一个形状, 不必先建一张同尺寸遮罩。
+// 圆角、斜切、按行描述的窗口都走这条; 两端按覆盖率混色, 与 Fill 的边界口径一致。
+func (b Brush) ShapeSprite(at, win, src image.Rectangle, img *image.RGBA, s Shape, opts SpriteOpts) {
+	if b.Dst == nil || img == nil || s == nil {
+		return
+	}
+	src = src.Intersect(img.Rect)
+	if at.Empty() || win.Empty() || src.Empty() || at.Dx() <= 0 {
+		return
+	}
+	win = win.Intersect(b.Bounds())
+	if win.Empty() {
+		return
+	}
+	dst := b.Dst
+	scale := float64(src.Dx()) / float64(at.Dx())
+	var buf [8]Span
+	for y := win.Min.Y; y < win.Max.Y; y++ {
+		sy := src.Min.Y + (y-at.Min.Y)*src.Dy()/at.Dy()
+		if sy < src.Min.Y || sy >= src.Max.Y {
+			continue
+		}
+		var spans []Span
+		if sc, ok := s.(SingleShape); ok {
+			sp, ok2 := sc.Single(y)
+			if !ok2 {
+				continue
+			}
+			spans = append(buf[:0], sp)
+		} else {
+			spans = s.Spans(y, buf[:0])
+		}
+		for _, sp := range spans {
+			sp = clampSpan(sp, dst.Rect)
+			lo, hi := int(math.Floor(sp.X0)), int(math.Ceil(sp.X1))
+			for x := lo; x < hi; x++ {
+				cov := min(sp.X1, float64(x+1)) - max(sp.X0, float64(x))
+				if cov <= 0 {
+					continue
+				}
+				sx := src.Min.X + int((float64(x-at.Min.X)+0.5)*scale)
+				if opts.Mirror {
+					sx = foldIndex(sx, src.Min.X, src.Max.X)
+				} else {
+					sx = clampInt(sx, src.Min.X, src.Max.X-1)
+				}
+				si := img.PixOffset(sx, sy)
+				a := img.Pix[si+3]
+				if cov < 1 {
+					a = uint8(math.Round(float64(a) * cov))
+				}
+				if a == 255 {
+					di := dst.PixOffset(x, y)
+					copy(dst.Pix[di:di+4], img.Pix[si:si+4])
+				} else if a != 0 {
+					rgba.BlendAt(dst.Pix, dst.PixOffset(x, y),
+						color.RGBA{R: img.Pix[si], G: img.Pix[si+1], B: img.Pix[si+2], A: a})
+				}
+			}
+		}
+	}
 }
