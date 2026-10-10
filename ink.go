@@ -1,5 +1,4 @@
 // Package ink 是一个面向"出图"的 2D 绘图引擎
-
 package ink
 
 import (
@@ -23,29 +22,44 @@ import (
 
 var ErrClosed = errors.New("ink: 引擎已关闭")
 
-const defaultCanvasMB = 64
+const (
+	defaultCanvasBytes = 64 << 20
+	// idleTick 是空闲巡检的节拍。
+	idleTick = time.Minute
+)
 
 type Options struct {
-	Assets        theme.Options
-	Encode        encode.Encoder
-	Workers       int
-	CanvasMB      int
-	Version       string
+	Assets theme.Options
+	Encode encode.Encoder
+	// Fallback 是主编码器出不来的那一档(通常是 JPEG); 为空表示没有退路。
+	Fallback encode.Encoder
+	// Workers 同时画几张; <=0 取"核数留 2 个"。它同时定闸门与算子分块。
+	Workers int
+	// CanvasBytes 画布池的字节额度; <=0 取默认值(见 defaultCanvasBytes)。
+	CanvasBytes int64
+	Version     string
+	// ContentDigest 是素材内容的摘要, 进指纹(见 theme.Digest)。
 	ContentDigest string
 	OnWarn        func(error)
+	// IdleAfter 多久没人出图就把两条缓存还回去; <=0 表示不回收。
+	IdleAfter time.Duration
 	// Trace 打开算子级统计(次数与耗时); 关着时每个算子只多一次判断。
 	Trace bool
 }
 
 type Stats struct {
 	Renders, Failures int64
-	InFlight, Peak    int64
-	Workers           int
-	CanvasBytes       int64
-	CanvasMax         int64
-	DecodeBytes       int64
-	DecodeMax         int64
-	Masks             int
+	// Queued 是排过队的次数: 拿到名额时闸门正好是满的。
+	Queued         int64
+	InFlight, Peak int64
+	Workers        int
+	// Coalesced 是"同一把 key 的并发被合成一次"的次数。
+	Coalesced   int64
+	CanvasBytes int64
+	CanvasMax   int64
+	DecodeBytes int64
+	DecodeMax   int64
+	Masks       int
 	// Ops 只有开着 Trace 时才有内容。
 	Ops []OpStat
 }
@@ -57,17 +71,40 @@ type OpStat struct {
 	Nanos int64
 }
 
+// Job 是一次出图: 尺寸、收尾缩放、编码预算与画法都在里面(见 Engine.RenderJob)。
+type Job struct {
+	// Key 非空时, 同一把 key 的并发调用只画一次, 结果共用。
+	Key string
+	// W / H 是画布尺寸。
+	W, H int
+	// Scale 是收尾缩放: 编码的是缩过的那一版; <=0 或 1 表示不缩。
+	Scale float64
+	// Budget 是编码的字节预算; <=0 表示不限(见 encode.Budgeted)。
+	Budget int64
+	// Draw 拿到一块空画布; 它是独占的, 画完由引擎收回。
+	Draw func(c *Canvas)
+}
+
 // Engine 是这台机器上的一份绘图账: 缺省、缓存、并发、指纹都挂在它身上。
 type Engine struct {
-	assets  *theme.Assets
-	enc     encode.Encoder
-	pool    *budget.Pool
-	gate    *budget.Gate
-	scratch *raster.Scratch
-	masks   *raster.MaskCache
-	par     raster.Par
-	epoch   string
-	onWarn  func(error)
+	assets *theme.Assets
+	enc    encode.Encoder
+	// fallback 是主编码器出不来的那一档; 为空表示没有退路。
+	fallback encode.Encoder
+	pool     *budget.Pool
+	gate     *budget.Gate
+	scratch  *raster.Scratch
+	masks    *raster.MaskCache
+	par      raster.Par
+	epoch    string
+	onWarn   func(error)
+
+	// flight 是"同一把 key 的并发只画一次"的登记处(见 RenderJob)。
+	flight *flight
+	// idleAfter 是空闲回收的门槛, <=0 关掉; lastUse 是最后一次出图的时间。
+	idleAfter time.Duration
+	lastUse   atomic.Int64
+	reaping   atomic.Bool
 
 	renders, failures atomic.Int64
 	closed            atomic.Bool
@@ -77,33 +114,41 @@ type Engine struct {
 	opNanos [kindCount]atomic.Int64
 }
 
+// DefaultWorkers 是没给 Workers 时引擎用的那个数: 核数留 2 个给主循环。
+func DefaultWorkers() int { return max(1, runtime.NumCPU()-2) }
+
 func New(opts Options) (*Engine, error) {
-	assets, err := theme.New(opts.Assets)
-	if err != nil {
-		return nil, err
-	}
 	enc := opts.Encode
 	if enc == nil {
 		enc = encode.JPEG(85)
 	}
 	workers := opts.Workers
 	if workers <= 0 {
-		workers = max(1, runtime.NumCPU()-2)
+		workers = DefaultWorkers()
 	}
-	canvasMB := opts.CanvasMB
-	if canvasMB <= 0 {
-		canvasMB = defaultCanvasMB
+	// 素材口径的缩放也照这台引擎的并行策略来: 机器快慢只有一个出处(见 Par)。
+	opts.Assets.Par = raster.Par{Workers: workers, MinRows: 32}
+	assets, err := theme.New(opts.Assets)
+	if err != nil {
+		return nil, err
+	}
+	canvasBytes := opts.CanvasBytes
+	if canvasBytes <= 0 {
+		canvasBytes = defaultCanvasBytes
 	}
 	e := &Engine{
-		assets:  assets,
-		enc:     enc,
-		pool:    budget.NewPool(int64(canvasMB) << 20),
-		gate:    budget.NewGate(workers),
-		scratch: raster.NewScratch(),
-		masks:   raster.NewMaskCache(32),
-		par:     raster.Par{Workers: workers, MinRows: 32},
-		onWarn:  opts.OnWarn,
-		trace:   opts.Trace,
+		assets:    assets,
+		enc:       enc,
+		fallback:  opts.Fallback,
+		pool:      budget.NewPool(canvasBytes),
+		gate:      budget.NewGate(workers),
+		scratch:   raster.NewScratch(),
+		masks:     raster.NewMaskCache(32),
+		par:       raster.Par{Workers: workers, MinRows: 32},
+		flight:    newFlight(),
+		idleAfter: opts.IdleAfter,
+		onWarn:    opts.OnWarn,
+		trace:     opts.Trace,
 	}
 	e.epoch = e.computeEpoch(opts.Version, opts.ContentDigest)
 	return e, nil
@@ -155,6 +200,56 @@ func (e *Engine) Draw(s *Sheet) (*image.RGBA, error) {
 	return out, nil
 }
 
+// RenderJob 画一张图并编码: 过闸门 → 池里取画布 → 画 → 按需收尾缩放 → 按预算编码。
+//
+// 不需要构造 Sheet 的调用方走这条; 同一把 Key 的并发调用只画一次(见 flight)。
+func (e *Engine) RenderJob(j Job) ([]byte, error) {
+	if e.closed.Load() {
+		return nil, ErrClosed
+	}
+	if j.Key == "" {
+		return e.renderJob(j)
+	}
+	return e.flight.do(j.Key, func() ([]byte, error) { return e.renderJob(j) })
+}
+
+func (e *Engine) renderJob(j Job) ([]byte, error) {
+	release := e.gate.Acquire()
+	defer release()
+	// 张数记在**拿到名额之后**: 它统计的是"真画了几张"。
+	e.renders.Add(1)
+	e.markUse()
+
+	img := e.pool.Get(j.W, j.H)
+	clear(img.Pix)
+	defer e.pool.Put(img)
+
+	c := &Canvas{eng: e, dst: img, xform: raster.Identity()}
+	defer func() {
+		if r := recover(); r != nil {
+			e.fail(errors.New("ink: 渲染 panic"))
+			panic(r)
+		}
+	}()
+	j.Draw(c)
+
+	// 收尾缩放只管编码的那一版, 两块都还给池子。scale 在取整后与源相同时原样返回 src,
+	// 那条路上只还一次 —— 还两次会让池子的空闲表里出现同一个指针两份。
+	out := img
+	if j.Scale > 0 && j.Scale != 1 {
+		if scaled := e.scale(img, j.Scale); scaled != img {
+			defer e.pool.Put(scaled)
+			out = scaled
+		}
+	}
+	b, err := e.encode(out, j.Budget)
+	if err != nil {
+		e.fail(err)
+		return nil, err
+	}
+	return b, nil
+}
+
 // RenderInto 把整张图直接画进调用方给的画布(零拷贝, 工具与测试走这条)。
 func (e *Engine) RenderInto(dst *image.RGBA, s *Sheet) error {
 	if e.closed.Load() {
@@ -169,31 +264,19 @@ func (e *Engine) RenderInto(dst *image.RGBA, s *Sheet) error {
 			panic(r)
 		}
 	}()
-	for i := range s.ops {
-		op := &s.ops[i]
-		if e.trace {
-			t0 := time.Now()
-			op.Draw(c)
-			e.spend(op.Kind, time.Since(t0))
-			continue
-		}
-		op.Draw(c)
-	}
+	e.drawOps(s, c)
 	return nil
 }
 
 // Render 画完并编码; 画布走池子, 用完就还。
 func (e *Engine) Render(s *Sheet) ([]byte, error) {
-	if e.closed.Load() {
-		return nil, ErrClosed
-	}
-	release := e.gate.Acquire()
-	defer release()
-	img := e.pool.Get(s.W, s.H)
-	clear(img.Pix)
-	defer e.pool.Put(img)
+	return e.RenderJob(Job{W: s.W, H: s.H, Draw: func(c *Canvas) { e.drawOps(s, c) }})
+}
 
-	c := &Canvas{eng: e, dst: img, xform: raster.Identity()}
+// Par 是这台引擎的并行策略(按行分块的行数与块数): 调用方要自己并行画时照它来, 机器快慢只有一个出处。
+func (e *Engine) Par() raster.Par { return e.par }
+
+func (e *Engine) drawOps(s *Sheet, c *Canvas) {
 	for i := range s.ops {
 		op := &s.ops[i]
 		if e.trace {
@@ -204,13 +287,71 @@ func (e *Engine) Render(s *Sheet) ([]byte, error) {
 		}
 		op.Draw(c)
 	}
-	out, err := e.enc.Encode(img)
-	if err != nil {
-		e.fail(err)
-		return nil, err
+}
+
+// scale 把画布按比例缩一版, 返回池里新的一块; 取整后与源同尺寸时原样返回 src。
+func (e *Engine) scale(src *image.RGBA, f float64) *image.RGBA {
+	w := int(math.Round(float64(src.Rect.Dx()) * f))
+	h := int(math.Round(float64(src.Rect.Dy()) * f))
+	if w == src.Rect.Dx() && h == src.Rect.Dy() {
+		return src
 	}
-	e.renders.Add(1)
-	return out, nil
+	dst := e.pool.Get(w, h)
+	raster.ResizeInto(src, dst, e.par)
+	return dst
+}
+
+// encode 有预算且编码器支持按预算退档就先试它, 失败退回不限预算的那一次。
+func (e *Engine) encode(img *image.RGBA, budget int64) ([]byte, error) {
+	if budget > 0 {
+		if b, ok := e.enc.(encode.Budgeted); ok {
+			out, err := b.EncodeWithin(img, budget)
+			if err == nil {
+				return out, nil
+			}
+			// 按预算那一趟失败就换人: 同一支再试一遍只会再赔一次(见 encode.WebP 的 giveUp)。
+			if e.fallback != nil {
+				return e.fallback.Encode(img)
+			}
+		}
+	}
+	out, err := e.enc.Encode(img)
+	if err == nil || e.fallback == nil {
+		return out, err
+	}
+	return e.fallback.Encode(img)
+}
+
+// markUse 记下"刚刚有人出图", 并按需拉起空闲回收。
+func (e *Engine) markUse() {
+	if e.idleAfter <= 0 {
+		return
+	}
+	e.lastUse.Store(time.Now().UnixNano())
+	if e.reaping.CompareAndSwap(false, true) {
+		go e.reapLoop()
+	}
+}
+
+// reapLoop 空闲一段时间后把缓存额度还回去, 然后自己退出。
+func (e *Engine) reapLoop() {
+	defer e.reaping.Store(false)
+	// 节拍不超过门槛: 门槛比节拍短时, 巡检不该还等满一个节拍才去看。
+	tick := min(idleTick, e.idleAfter)
+	for {
+		time.Sleep(tick)
+		if time.Since(time.Unix(0, e.lastUse.Load())) < e.idleAfter {
+			continue
+		}
+		e.Trim()
+		return
+	}
+}
+
+// Trim 把两条缓存能还的额度都还回去(画布池、解码图)。
+func (e *Engine) Trim() {
+	e.pool.Trim()
+	e.assets.DropAll()
 }
 
 func (e *Engine) fail(err error) {
@@ -247,6 +388,7 @@ func (e *Engine) Stats() Stats {
 	dec := e.assets.Stats()
 	return Stats{
 		Renders: e.renders.Load(), Failures: e.failures.Load(),
+		Queued: e.gate.Queued(), Coalesced: e.flight.coalesced.Load(),
 		InFlight: inFlight, Peak: peak, Workers: e.gate.Cap(),
 		CanvasBytes: used, CanvasMax: maxBytes,
 		DecodeBytes: dec.Bytes, DecodeMax: dec.Max,
@@ -270,9 +412,6 @@ func (e *Engine) giveBack(img *image.RGBA) {
 		e.pool.Put(img)
 	}
 }
-
-// NearestCanvasMB 估一块画布要多少 MB, 方便调用方按尺寸配额度。
-func NearestCanvasMB(w, h int) int { return int(math.Ceil(float64(w*h*4) / (1 << 20))) }
 
 // MB 是给配置项用的字节换算。
 func MB(n int) int64 { return int64(n) << 20 }

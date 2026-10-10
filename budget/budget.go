@@ -151,6 +151,8 @@ type Gate struct {
 	sem      chan struct{}
 	inFlight atomic.Int64
 	peak     atomic.Int64
+	// queued 记"拿到名额时闸门正好是满的"次数, 也就是真排过队的那些。
+	queued atomic.Int64
 }
 
 func NewGate(n int) *Gate {
@@ -160,9 +162,14 @@ func NewGate(n int) *Gate {
 	return &Gate{sem: make(chan struct{}, n)}
 }
 
-// Acquire 拿到一个名额, 返回的释放函数只能调用一次。
+// Acquire 拿到一个名额, 返回的释放函数只能调用一次; 满员时先记一笔排队再等。
 func (g *Gate) Acquire() func() {
-	g.sem <- struct{}{}
+	select {
+	case g.sem <- struct{}{}:
+	default:
+		g.queued.Add(1)
+		g.sem <- struct{}{}
+	}
 	cur := g.inFlight.Add(1)
 	for {
 		peak := g.peak.Load()
@@ -180,5 +187,8 @@ func (g *Gate) Acquire() func() {
 }
 
 func (g *Gate) Stats() (inFlight, peak int64) { return g.inFlight.Load(), g.peak.Load() }
+
+// Queued 是排过队的次数。
+func (g *Gate) Queued() int64 { return g.queued.Load() }
 
 func (g *Gate) Cap() int { return cap(g.sem) }

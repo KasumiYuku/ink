@@ -22,10 +22,13 @@ import (
 
 const defaultDecodeBytes = 128 << 20
 
+// Options 是素材口径的装配参数。
 type Options struct {
 	Dir         string
 	Resolve     func(key string) string
 	DecodeBytes int64
+	// Par 是解码后缩放/裁切那个算子的并行策略(见 raster.Par); Workers <= 0 取默认值。
+	Par         raster.Par
 	Fonts       map[string]string
 	FontOptions text.Options
 }
@@ -78,6 +81,9 @@ type Assets struct {
 	calls map[imgKey]*call
 	seq   uint64
 
+	// par 是解码后缩放/裁切那个算子的并行策略(接得上引擎就照引擎那份来)。
+	par raster.Par
+
 	hit, miss, decoded, tooBig atomic.Int64
 }
 
@@ -91,6 +97,10 @@ func New(opts Options) (*Assets, error) {
 		dir := opts.Dir
 		resolve = func(key string) string { return filepath.Join(dir, key) }
 	}
+	par := opts.Par
+	if par.Workers <= 0 {
+		par = raster.Par{Workers: 4, MinRows: 32}
+	}
 	a := &Assets{
 		dir:     opts.Dir,
 		resolve: resolve,
@@ -98,6 +108,7 @@ func New(opts Options) (*Assets, error) {
 		fonts:   text.NewSet(opts.FontOptions),
 		cache:   map[imgKey]*entry{},
 		calls:   map[imgKey]*call{},
+		par:     par,
 	}
 	for name, path := range opts.Fonts {
 		if !filepath.IsAbs(path) {
@@ -168,7 +179,7 @@ func (a *Assets) imageAt(k imgKey, name string) (*image.RGBA, error) {
 			c.err = err
 			return
 		}
-		c.img = k.fitTo(src)
+		c.img = k.fitTo(src, a.par)
 		a.decoded.Add(1)
 	})
 
@@ -209,11 +220,10 @@ func (a *Assets) decode(key string) (*image.RGBA, error) {
 }
 
 // fitTo 按 key 里的尺寸与 fit 处理原图: 盖满那条走"只算留下那块"的路, 其余等比缩进。
-func (k imgKey) fitTo(src *image.RGBA) *image.RGBA {
+func (k imgKey) fitTo(src *image.RGBA, par raster.Par) *image.RGBA {
 	if k.w <= 0 || k.h <= 0 {
 		return src
 	}
-	par := raster.Par{Workers: 4}
 	if k.fit == FitCover {
 		return raster.ResizeCover(src, k.w, k.h, par)
 	}
